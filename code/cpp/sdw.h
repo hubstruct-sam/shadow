@@ -35,6 +35,12 @@ typedef enum
 
 typedef struct
 {
+  VkCommandPool pool;
+  VkCommandBuffer buffer;
+} sdw_cmd_t;
+
+typedef struct
+{
   b8 complete;
   b8 shared;
   std::vector<u32> indices;
@@ -44,17 +50,11 @@ typedef struct
 
 typedef struct
 {
-
-} sdw_shd_t;
-
-typedef struct
-{
   struct
   {
     std::vector<std::vector<c8>> spirv;
     std::vector<VkShaderStageFlagBits> types;
   } shaders;
-  std::vector<VkDynamicState> dyn_states;
   VkPipelineLayout layout;
   VkPipeline line;
 } sdw_pip_t;
@@ -67,6 +67,7 @@ typedef struct
   VkSurfaceCapabilitiesKHR capabilities;
   VkSurfaceFormatKHR format;
   VkSwapchainKHR chain;
+  u32 image_idx;
 } sdw_swp_t;
 
 typedef struct
@@ -88,9 +89,9 @@ typedef VkRenderPass sdw_ren_t;
 
 typedef struct
 {
+  sdw_cmd_t cmd; // Command pool and buffers
   sdw_fbo_t fbo; // Framebuffers
   sdw_dev_t dev; // Logical device
-  sdw_dyn_t dyn; // Dynamic states (Pipeline)
   sdw_ext_t ext; // Extensions
   sdw_fam_t fam; // Queue families
   sdw_ins_t ins; // Instance
@@ -108,25 +109,27 @@ typedef struct
 
 #pragma region // --- Declarations
 
-local b8 _sdw_chk_vlk_dev(sdw_t *sdw);   // Check if Vulkan physical device is suitable
-local b8 _sdw_chk_vlk_ext(sdw_t *sdw);   // Check support for required extensions
-local b8 _sdw_chk_vlk_fam(sdw_t *sdw);   // Check support for queue families
-local b8 _sdw_chk_vlk_swp(sdw_t *sdw);   // Check support for swapchain
-local v0 _sdw_ini_vlk_1_ins(sdw_t *sdw); // Initialize Vulkan instance
-local v0 _sdw_ini_vlk_2_sur(sdw_t *sdw); // Initialize Vulkan surface
-local v0 _sdw_ini_vlk_3_phy(sdw_t *sdw); // Initialize Vulkan physical device
-local v0 _sdw_ini_vlk_4_dev(sdw_t *sdw); // Initialize Vulkan logical device
-local v0 _sdw_ini_vlk_5_swp(sdw_t *sdw); // Initialize Vulkan swap chain
-local v0 _sdw_ini_vlk_6_viw(sdw_t *sdw); // Initialize Vulkan image views
-local v0 _sdw_ini_vlk_7_ren(sdw_t *sdw); // Initialize Vulkan render pass
-local v0 _sdw_ini_vlk_8_pip(sdw_t *sdw); // Initialize Vulkan pipeline
-local v0 _sdw_ini_vlk_9_fbo(sdw_t *sdw); // Initialize Vulkan framebuffers
-local v0 _sdw_ini_vlk(sdw_t *sdw);       // Initialize all Vulkan objects
-local v0 _sdw_ini_win(sdw_t *sdw);       // Initialize GLFW window
-local v0 _sdw_see_ext(sdw_t *sdw);       // Show available Vulkan extensions
-local v0 _sdw_set_swp_ext(sdw_t *sdw);   // Set swapchain extent
-local v0 _sdw_set_swp_fmt(sdw_t *sdw);   // Set swapchain format
-local v0 _sdw_set_swp_mod(sdw_t *sdw);   // Set swapchain presentation mode
+local b8 _sdw_chk_vlk_dev(sdw_t *sdw);    // Check if Vulkan physical device is suitable
+local b8 _sdw_chk_vlk_ext(sdw_t *sdw);    // Check support for required extensions
+local b8 _sdw_chk_vlk_fam(sdw_t *sdw);    // Check support for queue families
+local b8 _sdw_chk_vlk_swp(sdw_t *sdw);    // Check support for swapchain
+local v0 _sdw_ini_vlk_01_ins(sdw_t *sdw); // Initialize Vulkan instance
+local v0 _sdw_ini_vlk_02_sur(sdw_t *sdw); // Initialize Vulkan surface
+local v0 _sdw_ini_vlk_03_phy(sdw_t *sdw); // Initialize Vulkan physical device
+local v0 _sdw_ini_vlk_04_dev(sdw_t *sdw); // Initialize Vulkan logical device
+local v0 _sdw_ini_vlk_05_swp(sdw_t *sdw); // Initialize Vulkan swap chain
+local v0 _sdw_ini_vlk_06_viw(sdw_t *sdw); // Initialize Vulkan image views
+local v0 _sdw_ini_vlk_07_ren(sdw_t *sdw); // Initialize Vulkan render pass
+local v0 _sdw_ini_vlk_08_pip(sdw_t *sdw); // Initialize Vulkan pipeline
+local v0 _sdw_ini_vlk_09_fbo(sdw_t *sdw); // Initialize Vulkan framebuffers
+local v0 _sdw_ini_vlk_10_cmd(sdw_t *sdw); // Initialize Vulkan command pool and buffers
+local v0 _sdw_ini_vlk(sdw_t *sdw);        // Initialize all Vulkan objects
+local v0 _sdw_ini_win(sdw_t *sdw);        // Initialize GLFW window
+local v0 _sdw_rec_cmd(sdw_t *sdw);        // Record a command buffer
+local v0 _sdw_see_ext(sdw_t *sdw);        // Show available Vulkan extensions
+local v0 _sdw_set_swp_ext(sdw_t *sdw);    // Set swapchain extent
+local v0 _sdw_set_swp_fmt(sdw_t *sdw);    // Set swapchain format
+local v0 _sdw_set_swp_mod(sdw_t *sdw);    // Set swapchain presentation mode
 
 #pragma endregion
 
@@ -164,6 +167,7 @@ local b8 _sdw_chk_vlk_ext(sdw_t *sdw)
   return required.empty();
 }
 
+// TODO: rivedere questa funzione
 local b8 _sdw_chk_vlk_fam(sdw_t *sdw)
 {
   u32 present_support = false;
@@ -205,7 +209,7 @@ local b8 _sdw_chk_vlk_swp(sdw_t *sdw)
   return !formats.empty() && !modes.empty();
 }
 
-local v0 _sdw_ini_vlk_1_ins(sdw_t *sdw)
+local v0 _sdw_ini_vlk_01_ins(sdw_t *sdw)
 {
   u32 ext_count = 0u;
   const c8 **ext_names = glfwGetRequiredInstanceExtensions(&ext_count);
@@ -234,7 +238,7 @@ local v0 _sdw_ini_vlk_1_ins(sdw_t *sdw)
   // sdw->ext.push_back(SDW_D_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
 }
 
-local v0 _sdw_ini_vlk_2_sur(sdw_t *sdw)
+local v0 _sdw_ini_vlk_02_sur(sdw_t *sdw)
 {
   SDW_STRUCT(VkWin32SurfaceCreateInfoKHR, create_info);
   create_info.hwnd = glfwGetWin32Window(sdw->win.ptr);
@@ -242,7 +246,7 @@ local v0 _sdw_ini_vlk_2_sur(sdw_t *sdw)
   SDW_TRY(vkCreateWin32SurfaceKHR(sdw->ins, &create_info, NULL, &(sdw->sur)));
 }
 
-local v0 _sdw_ini_vlk_3_phy(sdw_t *sdw)
+local v0 _sdw_ini_vlk_03_phy(sdw_t *sdw)
 {
   SDW_OBJECTS(vkEnumeratePhysicalDevices, devices, sdw->ins);
 
@@ -271,7 +275,7 @@ local v0 _sdw_ini_vlk_3_phy(sdw_t *sdw)
   }
 }
 
-local v0 _sdw_ini_vlk_4_dev(sdw_t *sdw)
+local v0 _sdw_ini_vlk_04_dev(sdw_t *sdw)
 {
   f32 fam_score = 1.0f;
   std::set<u32> fam_set = {sdw->fam.indices.begin(), sdw->fam.indices.end()};
@@ -299,7 +303,7 @@ local v0 _sdw_ini_vlk_4_dev(sdw_t *sdw)
   vkGetDeviceQueue(sdw->dev, sdw->fam.indices[SDW_FAM_PRE], 0u, &(sdw->fam.queue_pre));
 }
 
-local v0 _sdw_ini_vlk_5_swp(sdw_t *sdw)
+local v0 _sdw_ini_vlk_05_swp(sdw_t *sdw)
 {
   u32 img_count = 0u;
 
@@ -340,7 +344,7 @@ local v0 _sdw_ini_vlk_5_swp(sdw_t *sdw)
   sdw->swp.images = images;
 }
 
-local v0 _sdw_ini_vlk_6_viw(sdw_t *sdw)
+local v0 _sdw_ini_vlk_06_viw(sdw_t *sdw)
 {
   sdw->swp.views.resize(sdw->swp.images.size());
 
@@ -363,7 +367,7 @@ local v0 _sdw_ini_vlk_6_viw(sdw_t *sdw)
   }
 }
 
-local v0 _sdw_ini_vlk_7_ren(sdw_t *sdw)
+local v0 _sdw_ini_vlk_07_ren(sdw_t *sdw)
 {
   VkAttachmentDescription attach{};
   attach.format = sdw->swp.format.format;
@@ -392,7 +396,7 @@ local v0 _sdw_ini_vlk_7_ren(sdw_t *sdw)
   SDW_TRY(vkCreateRenderPass(sdw->dev, &ci_ren, NULL, &(sdw->ren)));
 }
 
-local v0 _sdw_ini_vlk_8_pip(sdw_t *sdw)
+local v0 _sdw_ini_vlk_08_pip(sdw_t *sdw)
 {
   // Create shaders
   std::vector<VkPipelineShaderStageCreateInfo> stages;
@@ -488,7 +492,7 @@ local v0 _sdw_ini_vlk_8_pip(sdw_t *sdw)
   }
 }
 
-local v0 _sdw_ini_vlk_9_fbo(sdw_t *sdw)
+local v0 _sdw_ini_vlk_09_fbo(sdw_t *sdw)
 {
   sdw->fbo.resize(sdw->swp.views.size());
   for (u32 i = 0u; i < sdw->swp.views.size(); i++)
@@ -504,17 +508,34 @@ local v0 _sdw_ini_vlk_9_fbo(sdw_t *sdw)
   }
 }
 
+local v0 _sdw_ini_vlk_10_cmd(sdw_t *sdw)
+{
+  // Define command pool
+  SDW_STRUCT(VkCommandPoolCreateInfo, ci_pool);
+  ci_pool.flags = SDW_D_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+  ci_pool.queueFamilyIndex = sdw->fam.indices[SDW_FAM_GFX];
+  SDW_TRY(vkCreateCommandPool(sdw->dev, &ci_pool, NULL, &(sdw->cmd.pool)));
+
+  // Allocate command buffer
+  SDW_STRUCT(VkCommandBufferAllocateInfo, ci_alloc);
+  ci_alloc.commandPool = sdw->cmd.pool;
+  ci_alloc.level = SDW_D_COMMAND_BUFFER_LEVEL_PRIMARY;
+  ci_alloc.commandBufferCount = 1u;
+  SDW_TRY(vkAllocateCommandBuffers(sdw->dev, &ci_alloc, &(sdw->cmd.buffer)));
+}
+
 local v0 _sdw_ini_vlk(sdw_t *sdw)
 {
-  _sdw_ini_vlk_1_ins(sdw);
-  _sdw_ini_vlk_2_sur(sdw);
-  _sdw_ini_vlk_3_phy(sdw);
-  _sdw_ini_vlk_4_dev(sdw);
-  _sdw_ini_vlk_5_swp(sdw);
-  _sdw_ini_vlk_6_viw(sdw);
-  _sdw_ini_vlk_7_ren(sdw);
-  _sdw_ini_vlk_8_pip(sdw);
-  _sdw_ini_vlk_9_fbo(sdw);
+  _sdw_ini_vlk_01_ins(sdw);
+  _sdw_ini_vlk_02_sur(sdw);
+  _sdw_ini_vlk_03_phy(sdw);
+  _sdw_ini_vlk_04_dev(sdw);
+  _sdw_ini_vlk_05_swp(sdw);
+  _sdw_ini_vlk_06_viw(sdw);
+  _sdw_ini_vlk_07_ren(sdw);
+  _sdw_ini_vlk_08_pip(sdw);
+  _sdw_ini_vlk_09_fbo(sdw);
+  _sdw_ini_vlk_10_cmd(sdw);
 }
 
 local v0 _sdw_ini_win(sdw_t *sdw)
@@ -523,6 +544,47 @@ local v0 _sdw_ini_win(sdw_t *sdw)
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
   glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
   sdw->win.ptr = glfwCreateWindow(sdw->win.width, sdw->win.height, sdw->win.name.c_str(), NULL, NULL);
+}
+
+local v0 _sdw_rec_cmd(sdw_t *sdw)
+{
+  // Begin command buffer
+  SDW_STRUCT(VkCommandBufferBeginInfo, ci_begin);
+  SDW_TRY(vkBeginCommandBuffer(sdw->cmd.buffer, &ci_begin));
+
+  // Begin render pass
+  SDW_STRUCT(VkRenderPassBeginInfo, ci_pass);
+  ci_pass.renderPass = sdw->ren;
+  ci_pass.framebuffer = sdw->fbo[sdw->swp.image_idx++];
+  ci_pass.renderArea.offset = {0u, 0u};
+  ci_pass.renderArea.extent = sdw->swp.capabilities.currentExtent;
+  ci_pass.clearValueCount = 1u;
+  ci_pass.pClearValues = SDW_CAPSULE(VkClearValue, 0.0f, 0.0f, 0.0f, 1.0f);
+
+  // Start recording commands in the buffer
+  vkCmdBeginRenderPass(sdw->cmd.buffer, &ci_pass, SDW_D_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(sdw->cmd.buffer, SDW_D_PIPELINE_BIND_POINT_GRAPHICS, sdw->pip.line);
+
+  // Dynamic state: define viewport properties
+  VkViewport view{};
+  view.x = 0.0f;
+  view.y = 0.0f;
+  view.width = sdw->swp.capabilities.currentExtent.width;
+  view.height = sdw->swp.capabilities.currentExtent.height;
+  view.minDepth = 0.0f;
+  view.maxDepth = 1.0f;
+  vkCmdSetViewport(sdw->cmd.buffer, 0u, 1u, &view);
+
+  // Dynamic state: define scissor properties
+  VkRect2D scissor{};
+  scissor.extent = sdw->swp.capabilities.currentExtent;
+  scissor.offset = {0u, 0u};
+  vkCmdSetScissor(sdw->cmd.buffer, 0u, 1u, &scissor);
+
+  // Finally, issue the draw command and close the recording process
+  vkCmdDraw(sdw->cmd.buffer, 3u, 1u, 0u, 0u);
+  vkCmdEndRenderPass(sdw->cmd.buffer);
+  SDW_TRY(vkEndCommandBuffer(sdw->cmd.buffer));
 }
 
 local v0 _sdw_see_ext(sdw_t *sdw)
@@ -586,6 +648,7 @@ local v0 _sdw_set_swp_mod(sdw_t *sdw)
 
 local v0 sdw_del(sdw_t *sdw)
 {
+  vkDestroyCommandPool(sdw->dev, sdw->cmd.pool, NULL);
   for (auto fbo : sdw->fbo)
   {
     vkDestroyFramebuffer(sdw->dev, fbo, NULL);
