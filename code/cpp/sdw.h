@@ -72,6 +72,13 @@ typedef struct
 
 typedef struct
 {
+  VkSemaphore sem_image;
+  VkSemaphore sem_render;
+  VkFence fen_flight;
+} sdw_syn_t;
+
+typedef struct
+{
   GLFWwindow *ptr;
   i32 width;
   i32 height;
@@ -100,6 +107,7 @@ typedef struct
   sdw_ren_t ren; // Render pass
   sdw_sur_t sur; // Surface
   sdw_swp_t swp; // Swapchain
+  sdw_syn_t syn; // Synchronization (semaphores and fences)
   sdw_win_t win; // GLFW window
 } sdw_t;
 
@@ -113,6 +121,7 @@ local b8 _sdw_chk_vlk_dev(sdw_t *sdw);    // Check if Vulkan physical device is 
 local b8 _sdw_chk_vlk_ext(sdw_t *sdw);    // Check support for required extensions
 local b8 _sdw_chk_vlk_fam(sdw_t *sdw);    // Check support for queue families
 local b8 _sdw_chk_vlk_swp(sdw_t *sdw);    // Check support for swapchain
+local v0 _sdw_drw_frm(sdw_t *sdw);        // Draw frame
 local v0 _sdw_ini_vlk_01_ins(sdw_t *sdw); // Initialize Vulkan instance
 local v0 _sdw_ini_vlk_02_sur(sdw_t *sdw); // Initialize Vulkan surface
 local v0 _sdw_ini_vlk_03_phy(sdw_t *sdw); // Initialize Vulkan physical device
@@ -123,6 +132,7 @@ local v0 _sdw_ini_vlk_07_ren(sdw_t *sdw); // Initialize Vulkan render pass
 local v0 _sdw_ini_vlk_08_pip(sdw_t *sdw); // Initialize Vulkan pipeline
 local v0 _sdw_ini_vlk_09_fbo(sdw_t *sdw); // Initialize Vulkan framebuffers
 local v0 _sdw_ini_vlk_10_cmd(sdw_t *sdw); // Initialize Vulkan command pool and buffers
+local v0 _sdw_ini_vlk_11_syn(sdw_t *sdw); // Initialize Vulkan synchronization objects
 local v0 _sdw_ini_vlk(sdw_t *sdw);        // Initialize all Vulkan objects
 local v0 _sdw_ini_win(sdw_t *sdw);        // Initialize GLFW window
 local v0 _sdw_rec_cmd(sdw_t *sdw);        // Record a command buffer
@@ -207,6 +217,40 @@ local b8 _sdw_chk_vlk_swp(sdw_t *sdw)
   SDW_OBJECTS(vkGetPhysicalDeviceSurfacePresentModesKHR, modes, sdw->phy, sdw->sur);
 
   return !formats.empty() && !modes.empty();
+}
+
+local v0 _sdw_drw_frm(sdw_t *sdw)
+{
+  // Wait for previous frame to be completed and reset fence
+  vkWaitForFences(sdw->dev, 1u, &(sdw->syn.fen_flight), true, UINT64_MAX);
+  vkResetFences(sdw->dev, 1u, &(sdw->syn.fen_flight));
+ 
+  // Acquire image from the swapchain
+  vkAcquireNextImageKHR(sdw->dev, sdw->swp.chain, UINT64_MAX, sdw->syn.sem_image, NULL, &(sdw->swp.image_idx));
+
+  // Record the command buffer
+  vkResetCommandBuffer(sdw->cmd.buffer, 0);
+  _sdw_rec_cmd(sdw); // TODO: questa funzione deve essere rivista per diventare general purpose
+
+  // Submit the command buffer
+  SDW_STRUCT(VkSubmitInfo, ci_submit);
+  ci_submit.waitSemaphoreCount = 1u;
+  ci_submit.pWaitSemaphores = SDW_CAPSULE(VkSemaphore, sdw->syn.sem_image);
+  ci_submit.pWaitDstStageMask = SDW_CAPSULE(VkPipelineStageFlags, SDW_D_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+  ci_submit.commandBufferCount = 1u;
+  ci_submit.pCommandBuffers = &(sdw->cmd.buffer);
+  ci_submit.signalSemaphoreCount = 1;
+  ci_submit.pSignalSemaphores = SDW_CAPSULE(VkSemaphore, sdw->syn.sem_render);;
+  SDW_TRY(vkQueueSubmit(sdw->fam.queue_gfx, 1u, &ci_submit, sdw->syn.fen_flight));
+
+  // Presentation
+  SDW_STRUCT(VkPresentInfoKHR, ci_pre);
+  ci_pre.waitSemaphoreCount = 1u;
+  ci_pre.pWaitSemaphores = ci_submit.pSignalSemaphores;
+  ci_pre.swapchainCount = 1u;
+  ci_pre.pSwapchains = SDW_CAPSULE(VkSwapchainKHR, sdw->swp.chain);
+  ci_pre.pImageIndices = &(sdw->swp.image_idx);
+  vkQueuePresentKHR(sdw->fam.queue_pre, &ci_pre);
 }
 
 local v0 _sdw_ini_vlk_01_ins(sdw_t *sdw)
@@ -388,11 +432,22 @@ local v0 _sdw_ini_vlk_07_ren(sdw_t *sdw)
   subpass.colorAttachmentCount = 1u;
   subpass.pColorAttachments = &ref;
 
+  // Define subpasses dependencies
+  VkSubpassDependency dep{};
+  dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+  dep.dstSubpass = 0u;
+  dep.srcStageMask = SDW_D_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  dep.srcAccessMask = 0u;
+  dep.dstStageMask = SDW_D_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  dep.dstAccessMask = SDW_D_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
   SDW_STRUCT(VkRenderPassCreateInfo, ci_ren);
   ci_ren.attachmentCount = 1u;
   ci_ren.pAttachments = &attach;
   ci_ren.subpassCount = 1u;
   ci_ren.pSubpasses = &subpass;
+  ci_ren.dependencyCount = 1u;
+  ci_ren.pDependencies = &dep;
   SDW_TRY(vkCreateRenderPass(sdw->dev, &ci_ren, NULL, &(sdw->ren)));
 }
 
@@ -524,6 +579,19 @@ local v0 _sdw_ini_vlk_10_cmd(sdw_t *sdw)
   SDW_TRY(vkAllocateCommandBuffers(sdw->dev, &ci_alloc, &(sdw->cmd.buffer)));
 }
 
+local v0 _sdw_ini_vlk_11_syn(sdw_t *sdw)
+{
+  // Create semaphores
+  SDW_STRUCT(VkSemaphoreCreateInfo, ci_sem);
+  SDW_TRY(vkCreateSemaphore(sdw->dev, &ci_sem, NULL, &(sdw->syn.sem_image)));
+  SDW_TRY(vkCreateSemaphore(sdw->dev, &ci_sem, NULL, &(sdw->syn.sem_render)));
+
+  // Create fence
+  SDW_STRUCT(VkFenceCreateInfo, ci_fen);
+  ci_fen.flags = SDW_D_FENCE_CREATE_SIGNALED_BIT;
+  SDW_TRY(vkCreateFence(sdw->dev, &ci_fen, NULL, &(sdw->syn.fen_flight)));
+}
+
 local v0 _sdw_ini_vlk(sdw_t *sdw)
 {
   _sdw_ini_vlk_01_ins(sdw);
@@ -536,6 +604,7 @@ local v0 _sdw_ini_vlk(sdw_t *sdw)
   _sdw_ini_vlk_08_pip(sdw);
   _sdw_ini_vlk_09_fbo(sdw);
   _sdw_ini_vlk_10_cmd(sdw);
+  _sdw_ini_vlk_11_syn(sdw);
 }
 
 local v0 _sdw_ini_win(sdw_t *sdw)
@@ -555,7 +624,7 @@ local v0 _sdw_rec_cmd(sdw_t *sdw)
   // Begin render pass
   SDW_STRUCT(VkRenderPassBeginInfo, ci_pass);
   ci_pass.renderPass = sdw->ren;
-  ci_pass.framebuffer = sdw->fbo[sdw->swp.image_idx++];
+  ci_pass.framebuffer = sdw->fbo[sdw->swp.image_idx];
   ci_pass.renderArea.offset = {0u, 0u};
   ci_pass.renderArea.extent = sdw->swp.capabilities.currentExtent;
   ci_pass.clearValueCount = 1u;
@@ -648,6 +717,9 @@ local v0 _sdw_set_swp_mod(sdw_t *sdw)
 
 local v0 sdw_del(sdw_t *sdw)
 {
+  vkDestroySemaphore(sdw->dev, sdw->syn.sem_image, NULL);
+  vkDestroySemaphore(sdw->dev, sdw->syn.sem_render, NULL);
+  vkDestroyFence(sdw->dev, sdw->syn.fen_flight, NULL);
   vkDestroyCommandPool(sdw->dev, sdw->cmd.pool, NULL);
   for (auto fbo : sdw->fbo)
   {
@@ -683,7 +755,10 @@ local v0 sdw_run(sdw_t *sdw)
   while ((!glfwWindowShouldClose(sdw->win.ptr)) && (!input_press('Q')))
   {
     glfwPollEvents();
+    _sdw_drw_frm(sdw);
   }
+  // Ensure all resource operations are completed before free them and quit
+  vkDeviceWaitIdle(sdw->dev);
 }
 
 #pragma endregion

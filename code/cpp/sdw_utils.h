@@ -43,7 +43,7 @@
   }
 
 #define SDW_CAPSULE(type, ...) \
-  ([]() -> const type * {                      \
+  ([&]() -> const type * {                      \
     static const type arr[] = { __VA_ARGS__ }; \
     return arr; }())
 
