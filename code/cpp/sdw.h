@@ -26,26 +26,32 @@
 
 #pragma region // --------- TYPES
 
-typedef enum
-{
-  SDW_FAM_GFX,
-  SDW_FAM_PRE,
-  SDW_FAM_NUM,
-} sdw_fam_e;
-
 typedef struct
 {
   VkCommandPool pool;
   VkCommandBuffer buffer;
 } sdw_cmd_t;
 
+typedef enum
+{
+  SDW_FAM_GFX, // Graphics
+  SDW_FAM_CMP, // Compute
+  SDW_FAM_TRX, // Transfer
+  SDW_FAM_PRE, // Presentation
+  SDW_FAM_NUM,
+} sdw_fam_e;
+
 typedef struct
 {
+  struct
+  {
+    b8 avail;
+    u32 idx;
+    VkQueue queue;
+  } data[SDW_FAM_NUM];
   b8 complete;
   b8 shared;
   std::vector<u32> indices;
-  VkQueue queue_gfx;
-  VkQueue queue_pre;
 } sdw_fam_t;
 
 typedef struct
@@ -151,12 +157,6 @@ local b8 _sdw_chk_vlk_dev(sdw_t *sdw)
   b8 chk_fam = false;
   b8 chk_swp = false;
 
-  sdw->fam.complete = false;
-  sdw->fam.shared = false;
-  sdw->fam.indices.resize(SDW_FAM_NUM);
-  sdw->fam.queue_gfx = SDW_D_NULL_HANDLE;
-  sdw->fam.queue_pre = SDW_D_NULL_HANDLE;
-
   chk_ext = _sdw_chk_vlk_ext(sdw);
   chk_fam = _sdw_chk_vlk_fam(sdw);
   chk_swp = _sdw_chk_vlk_swp(sdw);
@@ -177,25 +177,54 @@ local b8 _sdw_chk_vlk_ext(sdw_t *sdw)
   return required.empty();
 }
 
-// TODO: rivedere questa funzione
 local b8 _sdw_chk_vlk_fam(sdw_t *sdw)
 {
-  u32 present_support = false;
-
   if (sdw->phy)
   {
-    SDW_OBJECTS(vkGetPhysicalDeviceQueueFamilyProperties, qfams, sdw->phy);
-    for (u32 i = 0u; (i < qfams_count) && (sdw->fam.indices.size() < sdw->fam.indices.capacity()); i++)
+    // Retrieve information about available queue families
+    SDW_OBJECTS(vkGetPhysicalDeviceQueueFamilyProperties, fams, sdw->phy);
+    for (u32 i = 0u; (i < fams.size()) && (sdw->fam.indices.size() < SDW_FAM_NUM); i++)
     {
-      if (qfams[i].queueFlags & SDW_D_QUEUE_GRAPHICS_BIT)
+      if (!(sdw->fam.data[SDW_FAM_GFX].avail) && (fams[i].queueFlags & VK_QUEUE_GRAPHICS_BIT))
       {
         sdw->fam.indices.push_back(i);
+        sdw->fam.data[SDW_FAM_GFX].idx = i;
+        sdw->fam.data[SDW_FAM_GFX].avail = true;
       }
-      present_support = false;
-      vkGetPhysicalDeviceSurfaceSupportKHR(sdw->phy, i, sdw->sur, &present_support);
-      if (present_support)
+      if (!(sdw->fam.data[SDW_FAM_CMP].avail) && (fams[i].queueFlags & VK_QUEUE_COMPUTE_BIT))
       {
         sdw->fam.indices.push_back(i);
+        sdw->fam.data[SDW_FAM_CMP].idx = i;
+        sdw->fam.data[SDW_FAM_CMP].avail = true;
+      }
+      if (!(sdw->fam.data[SDW_FAM_TRX].avail) && (fams[i].queueFlags & VK_QUEUE_TRANSFER_BIT))
+      {
+        sdw->fam.indices.push_back(i);
+        sdw->fam.data[SDW_FAM_TRX].idx = i;
+        sdw->fam.data[SDW_FAM_TRX].avail = true;
+      }
+      if (!sdw->fam.data[SDW_FAM_PRE].avail)
+      {
+        vkGetPhysicalDeviceSurfaceSupportKHR(sdw->phy, i, sdw->sur, &(sdw->fam.data[SDW_FAM_PRE].idx));
+        if (sdw->fam.data[SDW_FAM_PRE].idx)
+        {
+          sdw->fam.indices.push_back(i);
+          sdw->fam.data[SDW_FAM_PRE].idx = i;
+          sdw->fam.data[SDW_FAM_PRE].avail = true;
+        }
+      }
+    }
+    // Set booleans for overall status
+    if (sdw->fam.indices.size() == SDW_FAM_NUM)
+    {
+      sdw->fam.complete = true;
+      sdw->fam.shared = true;
+      for (u32 i = 0u; (i < (sdw->fam.indices.size() - 1u)) && sdw->fam.shared; i++)
+      {
+        if (sdw->fam.data[i].idx != sdw->fam.data[i + 1u].idx)
+        {
+          sdw->fam.shared = false;
+        }
       }
     }
   }
@@ -203,9 +232,6 @@ local b8 _sdw_chk_vlk_fam(sdw_t *sdw)
   {
     LOG_ERR("invalid physical dev.\n");
   }
-
-  sdw->fam.complete = sdw->fam.indices.size() == sdw->fam.indices.capacity();
-  sdw->fam.shared = sdw->fam.indices[SDW_FAM_GFX] == sdw->fam.indices[SDW_FAM_PRE];
 
   return sdw->fam.complete;
 }
@@ -224,13 +250,13 @@ local v0 _sdw_drw_frm(sdw_t *sdw)
   // Wait for previous frame to be completed and reset fence
   vkWaitForFences(sdw->dev, 1u, &(sdw->syn.fen_flight), true, UINT64_MAX);
   vkResetFences(sdw->dev, 1u, &(sdw->syn.fen_flight));
- 
+
   // Acquire image from the swapchain
   vkAcquireNextImageKHR(sdw->dev, sdw->swp.chain, UINT64_MAX, sdw->syn.sem_image, NULL, &(sdw->swp.image_idx));
 
   // Record the command buffer
   vkResetCommandBuffer(sdw->cmd.buffer, 0);
-  _sdw_rec_cmd(sdw); // TODO: questa funzione deve essere rivista per diventare general purpose
+  _sdw_rec_cmd(sdw);
 
   // Submit the command buffer
   SDW_STRUCT(VkSubmitInfo, ci_submit);
@@ -240,8 +266,8 @@ local v0 _sdw_drw_frm(sdw_t *sdw)
   ci_submit.commandBufferCount = 1u;
   ci_submit.pCommandBuffers = &(sdw->cmd.buffer);
   ci_submit.signalSemaphoreCount = 1;
-  ci_submit.pSignalSemaphores = SDW_CAPSULE(VkSemaphore, sdw->syn.sem_render);;
-  SDW_TRY(vkQueueSubmit(sdw->fam.queue_gfx, 1u, &ci_submit, sdw->syn.fen_flight));
+  ci_submit.pSignalSemaphores = SDW_CAPSULE(VkSemaphore, sdw->syn.sem_render);
+  SDW_TRY(vkQueueSubmit(sdw->fam.data[SDW_FAM_GFX].queue, 1u, &ci_submit, sdw->syn.fen_flight));
 
   // Presentation
   SDW_STRUCT(VkPresentInfoKHR, ci_pre);
@@ -250,7 +276,7 @@ local v0 _sdw_drw_frm(sdw_t *sdw)
   ci_pre.swapchainCount = 1u;
   ci_pre.pSwapchains = SDW_CAPSULE(VkSwapchainKHR, sdw->swp.chain);
   ci_pre.pImageIndices = &(sdw->swp.image_idx);
-  vkQueuePresentKHR(sdw->fam.queue_pre, &ci_pre);
+  vkQueuePresentKHR(sdw->fam.data[SDW_FAM_PRE].queue, &ci_pre);
 }
 
 local v0 _sdw_ini_vlk_01_ins(sdw_t *sdw)
@@ -266,13 +292,13 @@ local v0 _sdw_ini_vlk_01_ins(sdw_t *sdw)
   app_info.engineVersion = VK_MAKE_API_VERSION(1, 0, 0, 0);
   app_info.apiVersion = VK_API_VERSION_1_0;
   const char *validation_layers[] = {"VK_LAYER_KHRONOS_validation"};
-  SDW_STRUCT(VkInstanceCreateInfo, create_info);
-  create_info.pApplicationInfo = &app_info;
-  create_info.enabledExtensionCount = ext_count;
-  create_info.ppEnabledExtensionNames = ext_names;
-  create_info.enabledLayerCount = 1;
-  create_info.ppEnabledLayerNames = validation_layers;
-  SDW_TRY(vkCreateInstance(&create_info, NULL, &(sdw->ins)));
+  SDW_STRUCT(VkInstanceCreateInfo, ci_ins);
+  ci_ins.pApplicationInfo = &app_info;
+  ci_ins.enabledExtensionCount = ext_count;
+  ci_ins.ppEnabledExtensionNames = ext_names;
+  ci_ins.enabledLayerCount = 1;
+  ci_ins.ppEnabledLayerNames = validation_layers;
+  SDW_TRY(vkCreateInstance(&ci_ins, NULL, &(sdw->ins)));
 
   // Show available extensions
   _sdw_see_ext(sdw);
@@ -284,10 +310,10 @@ local v0 _sdw_ini_vlk_01_ins(sdw_t *sdw)
 
 local v0 _sdw_ini_vlk_02_sur(sdw_t *sdw)
 {
-  SDW_STRUCT(VkWin32SurfaceCreateInfoKHR, create_info);
-  create_info.hwnd = glfwGetWin32Window(sdw->win.ptr);
-  create_info.hinstance = GetModuleHandle(NULL);
-  SDW_TRY(vkCreateWin32SurfaceKHR(sdw->ins, &create_info, NULL, &(sdw->sur)));
+  SDW_STRUCT(VkWin32SurfaceCreateInfoKHR, ci_sur);
+  ci_sur.hwnd = glfwGetWin32Window(sdw->win.ptr);
+  ci_sur.hinstance = GetModuleHandle(NULL);
+  SDW_TRY(vkCreateWin32SurfaceKHR(sdw->ins, &ci_sur, NULL, &(sdw->sur)));
 }
 
 local v0 _sdw_ini_vlk_03_phy(sdw_t *sdw)
@@ -297,10 +323,10 @@ local v0 _sdw_ini_vlk_03_phy(sdw_t *sdw)
   // Init the variable with a harmless state
   sdw->phy = SDW_D_NULL_HANDLE;
 
-  if (devices_count > 0u)
+  if (devices.size() > 0u)
   {
     // Check if any of the available devices fits
-    for (u32 i = 0u; (i < devices_count) && !(sdw->phy); i++)
+    for (u32 i = 0u; (i < devices.size()) && !(sdw->phy); i++)
     {
       sdw->phy = devices[i];
       if (_sdw_chk_vlk_dev(sdw) == false)
@@ -322,29 +348,34 @@ local v0 _sdw_ini_vlk_03_phy(sdw_t *sdw)
 local v0 _sdw_ini_vlk_04_dev(sdw_t *sdw)
 {
   f32 fam_score = 1.0f;
-  std::set<u32> fam_set = {sdw->fam.indices.begin(), sdw->fam.indices.end()};
-  std::vector<VkDeviceQueueCreateInfo> fam_create_infos;
-  VkPhysicalDeviceFeatures dev_feats{};
+  std::vector<VkDeviceQueueCreateInfo> ci_fams;
+  VkPhysicalDeviceFeatures features{};
 
-  for (const auto &i : fam_set)
+  // Create individual queues info if available
+  for (u32 i = 0u; i < SDW_FAM_NUM; i++)
   {
-    SDW_STRUCT(VkDeviceQueueCreateInfo, fam_create_info);
-    fam_create_info.queueFamilyIndex = sdw->fam.indices[i];
-    fam_create_info.queueCount = 1u;
-    fam_create_info.pQueuePriorities = &fam_score;
-    fam_create_infos.push_back(fam_create_info);
+    if (sdw->fam.data[i].avail)
+    {
+      SDW_STRUCT(VkDeviceQueueCreateInfo, ci_fam);
+      ci_fam.queueFamilyIndex = sdw->fam.data[i].idx;
+      ci_fam.queueCount = 1u;
+      ci_fam.pQueuePriorities = &fam_score;
+      ci_fams.push_back(ci_fam);
+    }
   }
 
-  SDW_STRUCT(VkDeviceCreateInfo, dev_ini_info);
-  dev_ini_info.pQueueCreateInfos = fam_create_infos.data();
-  dev_ini_info.queueCreateInfoCount = 1u;
-  dev_ini_info.pEnabledFeatures = &dev_feats;
-  dev_ini_info.enabledExtensionCount = (u32)sdw->ext.size();
-  dev_ini_info.ppEnabledExtensionNames = sdw->ext.data();
-  SDW_TRY(vkCreateDevice(sdw->phy, &dev_ini_info, NULL, &(sdw->dev)));
+  // Create device info passing accumulated queues info
+  SDW_STRUCT(VkDeviceCreateInfo, ci_dev);
+  ci_dev.pQueueCreateInfos = ci_fams.data();
+  ci_dev.queueCreateInfoCount = 1u;
+  ci_dev.pEnabledFeatures = &features;
+  ci_dev.enabledExtensionCount = (u32)sdw->ext.size();
+  ci_dev.ppEnabledExtensionNames = sdw->ext.data();
+  SDW_TRY(vkCreateDevice(sdw->phy, &ci_dev, NULL, &(sdw->dev)));
 
-  vkGetDeviceQueue(sdw->dev, sdw->fam.indices[SDW_FAM_GFX], 0u, &(sdw->fam.queue_gfx));
-  vkGetDeviceQueue(sdw->dev, sdw->fam.indices[SDW_FAM_PRE], 0u, &(sdw->fam.queue_pre));
+  // Get queues after device creation
+  vkGetDeviceQueue(sdw->dev, sdw->fam.data[SDW_FAM_GFX].idx, 0u, &(sdw->fam.data[SDW_FAM_GFX].queue));
+  vkGetDeviceQueue(sdw->dev, sdw->fam.data[SDW_FAM_PRE].idx, 0u, &(sdw->fam.data[SDW_FAM_PRE].queue));
 }
 
 local v0 _sdw_ini_vlk_05_swp(sdw_t *sdw)
@@ -357,32 +388,32 @@ local v0 _sdw_ini_vlk_05_swp(sdw_t *sdw)
 
   img_count = std::clamp(sdw->swp.capabilities.minImageCount + 1u, 0u, sdw->swp.capabilities.maxImageCount);
 
-  SDW_STRUCT(VkSwapchainCreateInfoKHR, create_info);
-  create_info.surface = sdw->sur;
-  create_info.minImageCount = img_count;
-  create_info.imageFormat = sdw->swp.format.format;
-  create_info.imageColorSpace = sdw->swp.format.colorSpace;
-  create_info.imageExtent = sdw->swp.capabilities.currentExtent;
-  create_info.imageArrayLayers = 1u;
-  create_info.imageUsage = SDW_D_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-  create_info.preTransform = sdw->swp.capabilities.currentTransform;
-  create_info.compositeAlpha = SDW_D_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-  create_info.presentMode = sdw->swp.mode;
-  create_info.clipped = SDW_D_TRUE;
-  create_info.oldSwapchain = SDW_D_NULL_HANDLE;
+  SDW_STRUCT(VkSwapchainCreateInfoKHR, ci_swap);
+  ci_swap.surface = sdw->sur;
+  ci_swap.minImageCount = img_count;
+  ci_swap.imageFormat = sdw->swp.format.format;
+  ci_swap.imageColorSpace = sdw->swp.format.colorSpace;
+  ci_swap.imageExtent = sdw->swp.capabilities.currentExtent;
+  ci_swap.imageArrayLayers = 1u;
+  ci_swap.imageUsage = SDW_D_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  ci_swap.preTransform = sdw->swp.capabilities.currentTransform;
+  ci_swap.compositeAlpha = SDW_D_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+  ci_swap.presentMode = sdw->swp.mode;
+  ci_swap.clipped = SDW_D_TRUE;
+  ci_swap.oldSwapchain = SDW_D_NULL_HANDLE;
   if (sdw->fam.shared)
   {
-    create_info.imageSharingMode = SDW_D_SHARING_MODE_EXCLUSIVE;
-    create_info.queueFamilyIndexCount = 0u;
-    create_info.pQueueFamilyIndices = NULL;
+    ci_swap.imageSharingMode = SDW_D_SHARING_MODE_EXCLUSIVE;
+    ci_swap.queueFamilyIndexCount = 0u;
+    ci_swap.pQueueFamilyIndices = NULL;
   }
   else
   {
-    create_info.imageSharingMode = SDW_D_SHARING_MODE_CONCURRENT;
-    create_info.queueFamilyIndexCount = 2u;
-    create_info.pQueueFamilyIndices = sdw->fam.indices.data();
+    ci_swap.imageSharingMode = SDW_D_SHARING_MODE_CONCURRENT;
+    ci_swap.queueFamilyIndexCount = sdw->fam.indices.size();
+    ci_swap.pQueueFamilyIndices = sdw->fam.indices.data();
   }
-  SDW_TRY(vkCreateSwapchainKHR(sdw->dev, &create_info, NULL, &(sdw->swp.chain)));
+  SDW_TRY(vkCreateSwapchainKHR(sdw->dev, &ci_swap, NULL, &(sdw->swp.chain)));
 
   SDW_OBJECTS(vkGetSwapchainImagesKHR, images, sdw->dev, sdw->swp.chain);
   sdw->swp.images = images;
@@ -394,20 +425,20 @@ local v0 _sdw_ini_vlk_06_viw(sdw_t *sdw)
 
   for (u32 i = 0u; i < sdw->swp.images.size(); i++)
   {
-    SDW_STRUCT(VkImageViewCreateInfo, create_info);
-    create_info.image = sdw->swp.images[i];
-    create_info.viewType = SDW_D_IMAGE_VIEW_TYPE_2D;
-    create_info.format = sdw->swp.format.format;
-    create_info.components.r = SDW_D_COMPONENT_SWIZZLE_IDENTITY;
-    create_info.components.g = SDW_D_COMPONENT_SWIZZLE_IDENTITY;
-    create_info.components.b = SDW_D_COMPONENT_SWIZZLE_IDENTITY;
-    create_info.components.a = SDW_D_COMPONENT_SWIZZLE_IDENTITY;
-    create_info.subresourceRange.aspectMask = SDW_D_IMAGE_ASPECT_COLOR_BIT;
-    create_info.subresourceRange.baseMipLevel = 0u;
-    create_info.subresourceRange.levelCount = 1u;
-    create_info.subresourceRange.baseArrayLayer = 0u;
-    create_info.subresourceRange.layerCount = 1u;
-    SDW_TRY(vkCreateImageView(sdw->dev, &create_info, NULL, &(sdw->swp.views[i])));
+    SDW_STRUCT(VkImageViewCreateInfo, ci_iview);
+    ci_iview.image = sdw->swp.images[i];
+    ci_iview.viewType = SDW_D_IMAGE_VIEW_TYPE_2D;
+    ci_iview.format = sdw->swp.format.format;
+    ci_iview.components.r = SDW_D_COMPONENT_SWIZZLE_IDENTITY;
+    ci_iview.components.g = SDW_D_COMPONENT_SWIZZLE_IDENTITY;
+    ci_iview.components.b = SDW_D_COMPONENT_SWIZZLE_IDENTITY;
+    ci_iview.components.a = SDW_D_COMPONENT_SWIZZLE_IDENTITY;
+    ci_iview.subresourceRange.aspectMask = SDW_D_IMAGE_ASPECT_COLOR_BIT;
+    ci_iview.subresourceRange.baseMipLevel = 0u;
+    ci_iview.subresourceRange.levelCount = 1u;
+    ci_iview.subresourceRange.baseArrayLayer = 0u;
+    ci_iview.subresourceRange.layerCount = 1u;
+    SDW_TRY(vkCreateImageView(sdw->dev, &ci_iview, NULL, &(sdw->swp.views[i])));
   }
 }
 
@@ -454,31 +485,31 @@ local v0 _sdw_ini_vlk_07_ren(sdw_t *sdw)
 local v0 _sdw_ini_vlk_08_pip(sdw_t *sdw)
 {
   // Create shaders
-  std::vector<VkPipelineShaderStageCreateInfo> stages;
+  std::vector<VkPipelineShaderStageCreateInfo> ci_stages;
   for (u8 i = 0u; i < sdw->pip.shaders.spirv.size(); i++)
   {
     auto code = sdw->pip.shaders.spirv[i];
-    SDW_STRUCT(VkPipelineShaderStageCreateInfo, stage_info);
-    stage_info.stage = sdw->pip.shaders.types[i];
-    stage_info.pName = "main";
-    SDW_STRUCT(VkShaderModuleCreateInfo, create_info);
-    create_info.codeSize = code.size();
-    create_info.pCode = reinterpret_cast<const uint32_t *>(code.data());
-    SDW_TRY(vkCreateShaderModule(sdw->dev, &create_info, NULL, &(stage_info.module)));
-    stages.push_back(stage_info);
+    SDW_STRUCT(VkPipelineShaderStageCreateInfo, ci_stage);
+    ci_stage.stage = sdw->pip.shaders.types[i];
+    ci_stage.pName = "main";
+    SDW_STRUCT(VkShaderModuleCreateInfo, ci_shader);
+    ci_shader.codeSize = code.size();
+    ci_shader.pCode = reinterpret_cast<const uint32_t *>(code.data());
+    SDW_TRY(vkCreateShaderModule(sdw->dev, &ci_shader, NULL, &(ci_stage.module)));
+    ci_stages.push_back(ci_stage);
   }
 
   // Set vertex input properties (bindings/attributes)
-  SDW_STRUCT(VkPipelineVertexInputStateCreateInfo, ci_vertex);
-  ci_vertex.vertexBindingDescriptionCount = 0u;
-  ci_vertex.pVertexBindingDescriptions = NULL;
-  ci_vertex.vertexAttributeDescriptionCount = 0u;
-  ci_vertex.pVertexAttributeDescriptions = NULL;
+  SDW_STRUCT(VkPipelineVertexInputStateCreateInfo, ci_ivex);
+  ci_ivex.vertexBindingDescriptionCount = 0u;
+  ci_ivex.pVertexBindingDescriptions = NULL;
+  ci_ivex.vertexAttributeDescriptionCount = 0u;
+  ci_ivex.pVertexAttributeDescriptions = NULL;
 
   // Set the type of primitive we're dealing with
-  SDW_STRUCT(VkPipelineInputAssemblyStateCreateInfo, ci_assembly);
-  ci_assembly.topology = SDW_D_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-  ci_assembly.primitiveRestartEnable = false;
+  SDW_STRUCT(VkPipelineInputAssemblyStateCreateInfo, ci_iasm);
+  ci_iasm.topology = SDW_D_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  ci_iasm.primitiveRestartEnable = false;
 
   // Define viewport properties
   SDW_STRUCT(VkPipelineViewportStateCreateInfo, ci_view);
@@ -526,9 +557,9 @@ local v0 _sdw_ini_vlk_08_pip(sdw_t *sdw)
   // Create graphics pipeline
   SDW_STRUCT(VkGraphicsPipelineCreateInfo, ci_pip);
   ci_pip.stageCount = 2;
-  ci_pip.pStages = stages.data();
-  ci_pip.pVertexInputState = &ci_vertex;
-  ci_pip.pInputAssemblyState = &ci_assembly;
+  ci_pip.pStages = ci_stages.data();
+  ci_pip.pVertexInputState = &ci_ivex;
+  ci_pip.pInputAssemblyState = &ci_iasm;
   ci_pip.pViewportState = &ci_view;
   ci_pip.pRasterizationState = &ci_raster;
   ci_pip.pMultisampleState = &ci_multisamp;
@@ -540,8 +571,8 @@ local v0 _sdw_ini_vlk_08_pip(sdw_t *sdw)
   // Finally instantiate the pipeline
   SDW_TRY(vkCreateGraphicsPipelines(sdw->dev, NULL, 1, &ci_pip, NULL, &(sdw->pip.line)));
 
-  // Destroy info module stages (MUST be done at the end)
-  for (auto stage : stages)
+  // Destroy info module ci_stages (MUST be done at the end)
+  for (auto stage : ci_stages)
   {
     vkDestroyShaderModule(sdw->dev, stage.module, NULL);
   }
@@ -568,7 +599,7 @@ local v0 _sdw_ini_vlk_10_cmd(sdw_t *sdw)
   // Define command pool
   SDW_STRUCT(VkCommandPoolCreateInfo, ci_pool);
   ci_pool.flags = SDW_D_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-  ci_pool.queueFamilyIndex = sdw->fam.indices[SDW_FAM_GFX];
+  ci_pool.queueFamilyIndex = sdw->fam.data[SDW_FAM_GFX].idx;
   SDW_TRY(vkCreateCommandPool(sdw->dev, &ci_pool, NULL, &(sdw->cmd.pool)));
 
   // Allocate command buffer
@@ -615,6 +646,7 @@ local v0 _sdw_ini_win(sdw_t *sdw)
   sdw->win.ptr = glfwCreateWindow(sdw->win.width, sdw->win.height, sdw->win.name.c_str(), NULL, NULL);
 }
 
+// TODO: make it generic to support custom command buffers
 local v0 _sdw_rec_cmd(sdw_t *sdw)
 {
   // Begin command buffer
@@ -662,7 +694,7 @@ local v0 _sdw_see_ext(sdw_t *sdw)
   SDW_OBJECTS(vkEnumerateInstanceExtensionProperties, ext, NULL);
 
   LOG_MSG("available ext:\n");
-  for (u32 i = 0u; i < ext_count; i++)
+  for (u32 i = 0u; i < ext.size(); i++)
   {
     LOG_MSG("\t - %s\n", ext[i].extensionName);
   }

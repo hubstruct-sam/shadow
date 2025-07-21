@@ -22,7 +22,7 @@
   type var{};                 \
   var.sType = (VkStructureType)SdwMapSE_##type
 
-#define SDW_TRY(fcall)                                \
+#define SDW_TRY(fcall)                                    \
   do                                                      \
   {                                                       \
     VkResult result = fcall;                              \
